@@ -44,6 +44,7 @@ pub struct Sender {
     finish_requested: bool,
     streaming_window: usize,
     rx_nonstop: bool,
+    escape_control: bool,
 }
 
 impl Sender {
@@ -71,6 +72,7 @@ impl Sender {
             finish_requested: false,
             streaming_window: SUBPACKET_PER_ACK,
             rx_nonstop: false,
+            escape_control: false,
         };
         sender.queue_zrqinit()?;
         Ok(sender)
@@ -337,8 +339,12 @@ impl Sender {
     }
 
     fn queue_header(&mut self, header: Header) -> Result<(), Error> {
+        let escape_control = self.escape_control;
         let mut writer = self.queue_writer()?;
-        if header.write(&mut writer)?.is_none() {
+        if header
+            .write_with_escape_control(&mut writer, escape_control)?
+            .is_none()
+        {
             return Err(Error::OutOfMemory);
         }
         Ok(())
@@ -352,7 +358,15 @@ impl Sender {
         let file_size = self.file_size;
         let file_name = &self.file_name;
         let mut writer = BufferWriter::new(&mut self.outgoing);
-        if write_zfile(&mut writer, &mut self.buf, file_name, file_size)?.is_none() {
+        if write_zfile(
+            &mut writer,
+            &mut self.buf,
+            file_name,
+            file_size,
+            self.escape_control,
+        )?
+        .is_none()
+        {
             return Err(Error::OutOfMemory);
         }
         Ok(())
@@ -365,16 +379,17 @@ impl Sender {
         kind: SubpacketType,
         include_header: bool,
     ) -> Result<(), Error> {
+        let escape_control = self.escape_control;
         let mut writer = self.queue_writer()?;
         if include_header
             && ZDATA_HEADER
                 .with_count(offset)
-                .write(&mut writer)?
+                .write_with_escape_control(&mut writer, escape_control)?
                 .is_none()
         {
             return Err(Error::OutOfMemory);
         }
-        if write_subpacket(&mut writer, Encoding::ZBIN32, kind, data)?.is_none() {
+        if write_subpacket(&mut writer, Encoding::ZBIN32, kind, data, escape_control)?.is_none() {
             return Err(Error::OutOfMemory);
         }
         Ok(())
@@ -464,6 +479,7 @@ impl Sender {
         let flags = header.count().to_le_bytes();
         let rx_buf_size = u16::from_le_bytes([flags[0], flags[1]]) as usize;
         let caps = flags[3];
+        self.escape_control |= (caps & Zrinit::ESCCTL.bits()) != 0;
         let can_ovio = (caps & Zrinit::CANOVIO.bits()) != 0;
 
         // Remember whether the streaming window governs pacing so a later
